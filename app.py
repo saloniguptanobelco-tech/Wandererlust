@@ -44,6 +44,9 @@ if "copied_password" not in st.session_state:
     st.session_state.copied_password = ""
 if "copied_site" not in st.session_state:
     st.session_state.copied_site = ""
+if "vault_decode_error" not in st.session_state:
+    st.session_state.vault_decode_error = False
+
 
 # ----------------------------------------------------
 # 🔐 Security & Cryptography Helpers
@@ -124,15 +127,20 @@ def decrypt_vault(phrase: str) -> dict:
     """Decrypt the entire vault entries from .vault file."""
     if not os.path.exists(VAULT_FILE):
         return {"entries": []}
-    with open(VAULT_FILE, "r") as file:
-        payload = json.load(file)
-    
-    salt = base64.b64decode(payload["salt"].encode('utf-8'))
-    ciphertext = base64.b64decode(payload["ciphertext"].encode('utf-8'))
-    
-    key = derive_key(phrase, salt)
-    decrypted_bytes = rc4_crypt(ciphertext, key)
-    return json.loads(decrypted_bytes.decode('utf-8'))
+    try:
+        with open(VAULT_FILE, "r") as file:
+            payload = json.load(file)
+        
+        salt = base64.b64decode(payload["salt"].encode('utf-8'))
+        ciphertext = base64.b64decode(payload["ciphertext"].encode('utf-8'))
+        
+        key = derive_key(phrase, salt)
+        decrypted_bytes = rc4_crypt(ciphertext, key)
+        return json.loads(decrypted_bytes.decode('utf-8'))
+    except Exception as e:
+        st.session_state.vault_decode_error = True
+        return {"entries": []}
+
 
 def save_vault(phrase: str, vault_data: dict):
     """Encrypt and save the updated vault data to the .vault file."""
@@ -763,6 +771,64 @@ def render_registration_screen():
                 import time
                 time.sleep(1.5)
                 st.rerun()
+
+
+# ----------------------------------------------------
+# ⚠️ Vault Reset Screen
+# ----------------------------------------------------
+def render_reset_ui():
+    inject_custom_styles(is_dark_theme=False)
+    
+    st.markdown("""
+    <style>
+    .reset-card {
+        background-color: #ffffff;
+        border-radius: 16px;
+        padding: 40px;
+        max-width: 600px;
+        margin: 60px auto;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+        border: 1px solid #EAE6DF;
+        text-align: center;
+    }
+    .reset-title {
+        font-family: 'Playfair Display', serif;
+        font-size: 28px;
+        font-weight: 700;
+        color: #C4622D;
+        margin-bottom: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+    }
+    .reset-subtitle {
+        font-size: 15px;
+        color: #555555;
+        margin-bottom: 30px;
+        line-height: 1.6;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="reset-card">
+        <div class="reset-title">⚠️ Incompatible Vault Format</div>
+        <div class="reset-subtitle">
+            An existing <code>.vault</code> file was detected, but its encryption format is incompatible with the current pure-Python cryptographic engine (RC4-drop1024). This typically happens if the file was created using an older version of this application that relied on the <code>cryptography</code> library.<br><br>
+            To continue, you must reset the vault file. <b>Warning:</b> This will permanently erase any existing passwords stored in this vault file.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_l, col_m, col_r = st.columns([1, 2, 1])
+    with col_m:
+        if st.button("🗑 Reset & Initialize New Vault", use_container_width=True):
+            if os.path.exists(VAULT_FILE):
+                os.remove(VAULT_FILE)
+            st.session_state.clear()
+            st.rerun()
+
 
 
 # ----------------------------------------------------
@@ -1510,7 +1576,10 @@ def render_vault_interior():
 # ----------------------------------------------------
 # 🎛 Main Application Control Flow
 # ----------------------------------------------------
-if not os.path.exists(VAULT_FILE):
+if st.session_state.get("vault_decode_error", False):
+    # Incompatible vault file detected
+    render_reset_ui()
+elif not os.path.exists(VAULT_FILE):
     # Vault file does not exist, trigger setup
     render_registration_screen()
 else:
