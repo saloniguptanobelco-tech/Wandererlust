@@ -52,6 +52,11 @@ if "trigger_setup_pending" not in st.session_state:
     st.session_state.trigger_setup_pending = False
 if "temp_trigger_phrase" not in st.session_state:
     st.session_state.temp_trigger_phrase = ""
+if "login_pending" not in st.session_state:
+    st.session_state.login_pending = False
+if "master_phrase" not in st.session_state:
+    st.session_state.master_phrase = ""
+
 
 
 
@@ -120,10 +125,10 @@ def is_username_taken(username: str) -> bool:
         pass
     return False
 
-def init_user_vault(username: str, name: str, phrase: str):
-    """Initialize a new local user-specific vault file."""
+def init_user_vault(username: str, name: str, phrase: str, masterphrase: str):
+    """Initialize a new local user-specific vault file using trigger phrase and masterphrase for double security."""
     salt = os.urandom(16)
-    key = derive_key(phrase, salt)
+    key = derive_key(masterphrase, salt)
     
     vault_data = {"entries": []}
     plaintext = json.dumps(vault_data).encode('utf-8')
@@ -145,11 +150,11 @@ def verify_phrase(phrase: str) -> bool:
     filepath = get_vault_filepath(phrase)
     return os.path.exists(filepath)
 
-def decrypt_vault(phrase: str) -> dict:
-    """Decrypt the user-specific vault entries."""
+def decrypt_vault_with_master(phrase: str, masterphrase: str):
+    """Decrypt the user-specific vault entries using the masterphrase."""
     filepath = get_vault_filepath(phrase)
     if not os.path.exists(filepath):
-        return {"entries": []}
+        return None
     try:
         with open(filepath, "r") as file:
             payload = json.load(file)
@@ -157,12 +162,20 @@ def decrypt_vault(phrase: str) -> dict:
         salt = base64.b64decode(payload["salt"].encode('utf-8'))
         ciphertext = base64.b64decode(payload["ciphertext"].encode('utf-8'))
         
-        key = derive_key(phrase, salt)
+        key = derive_key(masterphrase, salt)
         decrypted_bytes = rc4_crypt(ciphertext, key)
         return json.loads(decrypted_bytes.decode('utf-8'))
-    except Exception as e:
-        st.session_state.vault_decode_error = True
-        return {"entries": []}
+    except Exception:
+        return None
+
+def decrypt_vault(phrase: str) -> dict:
+    """Decrypt the user-specific vault entries using the stored session masterphrase."""
+    master = st.session_state.get("master_phrase", "")
+    decrypted = decrypt_vault_with_master(phrase, master)
+    if decrypted is not None:
+        return decrypted
+    st.session_state.vault_decode_error = True
+    return {"entries": []}
 
 def save_vault(phrase: str, vault_data: dict):
     """Encrypt and save the updated vault data to the user-specific vault file."""
@@ -240,6 +253,12 @@ def inject_custom_styles(is_dark_theme=False):
             background-color: #FAF7F2 !important;
             color: #2C2C2C !important;
             font-family: 'Lato', sans-serif !important;
+        }
+        
+        label, [data-testid="stWidgetLabel"] p {
+            color: #2C2C2C !important;
+            font-weight: 600 !important;
+            opacity: 1 !important;
         }
         
         .block-container {
@@ -728,20 +747,20 @@ def render_user_setup_screen(temp_trigger: str):
     st.markdown("""
     <style>
     .reg-card {
-        background-color: #ffffff;
+        background-color: #ffffff !important;
         border-radius: 16px;
         padding: 40px;
-        max-width: 500px;
-        margin: 60px auto;
+        max-width: 600px;
+        margin: 40px auto;
         box-shadow: 0 10px 30px rgba(0,0,0,0.05);
         border: 1px solid #EAE6DF;
         text-align: center;
     }
     .reg-title {
         font-family: 'Playfair Display', serif;
-        font-size: 30px;
+        font-size: 32px;
         font-weight: 700;
-        color: #2C2C2C;
+        color: #2C2C2C !important;
         margin-bottom: 8px;
         display: flex;
         align-items: center;
@@ -749,10 +768,37 @@ def render_user_setup_screen(temp_trigger: str):
         gap: 10px;
     }
     .reg-subtitle {
-        font-size: 14px;
-        color: #666666;
+        font-size: 15px;
+        color: #555555 !important;
         margin-bottom: 30px;
         line-height: 1.5;
+    }
+    .section-header {
+        color: #C4622D !important;
+        margin-top: 25px;
+        margin-bottom: 12px;
+        border-bottom: 1px solid #EAE6DF;
+        padding-bottom: 5px;
+        text-align: left;
+        font-size: 18px;
+        font-weight: 700;
+    }
+    .section-description {
+        font-size: 13.5px;
+        color: #666666 !important;
+        text-align: left;
+        margin-top: -8px;
+        margin-bottom: 15px;
+        line-height: 1.4;
+    }
+    /* Explicitly override label and sub-label colors for maximum visibility */
+    label, [data-testid="stWidgetLabel"] p {
+        color: #2C2C2C !important;
+        font-weight: 700 !important;
+        opacity: 1 !important;
+    }
+    div[data-testid="stFormSubmitButton"] button, div[data-testid="stButton"] button {
+        margin-top: 10px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -761,28 +807,57 @@ def render_user_setup_screen(temp_trigger: str):
     <div class="reg-card">
         <div class="reg-title">🔐 Initialize Personal Vault</div>
         <div class="reg-subtitle">
-            Configure your user profile and master trigger phrase to initialize your private encrypted vault.
+            Create your profile and configure double-security (Stealth Decoy Trigger + Encryption Masterphrase) to initialize your private database.
         </div>
     </div>
     """, unsafe_allow_html=True)
     
     # Inputs centered on page
-    col_l, col_m, col_r = st.columns([1, 2, 1])
+    col_l, col_m, col_r = st.columns([1, 3, 1])
     with col_m:
-        full_name = st.text_input("Full Name", placeholder="e.g. John Doe")
-        username = st.text_input("Username", placeholder="e.g. johndoe")
-        phrase = st.text_input("Master Trigger Phrase", type="password", value=temp_trigger, help="Minimum 8 characters.")
-        confirm = st.text_input("Confirm Trigger Phrase", type="password", value=temp_trigger)
+        # 1. Profile Information
+        st.markdown('<div class="section-header">👤 1. Profile Details</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-description">Choose a display name and unique login username for your personal vault.</div>', unsafe_allow_html=True)
+        
+        full_name = st.text_input("Full Name", placeholder="e.g. John Doe", help="Enter your full name.")
+        username = st.text_input("Username", placeholder="e.g. johndoe", help="Choose a unique username.")
+        
+        # 2. First Security Layer: Decoy Trigger
+        st.markdown('<div class="section-header">🤫 2. First Security Layer: Decoy Trigger</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-description">This secret phrase triggers your vault screen when typed into the travel blog search bar or newsletter input. Keep it secret!</div>', unsafe_allow_html=True)
+        
+        phrase = st.text_input("Master Trigger Phrase", type="password", value=temp_trigger, help="This is the word/phrase you type on the decoy travel blog to show the vault entry screen. Keep it secret!")
+        confirm_phrase = st.text_input("Confirm Trigger Phrase", type="password", value=temp_trigger, help="Re-type your trigger phrase.")
         
         if phrase:
-            score, label, color = check_password_strength(phrase)
+            p_score, p_label, p_color = check_password_strength(phrase)
             st.markdown(f"""
             <div style='margin-bottom: 20px; text-align: left;'>
                 <div style='display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;'>
-                    <span style='color: #666666;'>Phrase Strength: <b style='color: {color};'>{label}</b></span>
+                    <span style='color: #2C2C2C; font-weight: 600;'>Trigger Phrase Strength: <b style='color: {p_color};'>{p_label}</b></span>
                 </div>
                 <div style='background-color:#EAE6DF; height:6px; border-radius:3px; overflow:hidden;'>
-                    <div style='background-color:{color}; width:{score}%; height:100%; transition: width 0.3s ease;'></div>
+                    <div style='background-color:{p_color}; width:{p_score}%; height:100%; transition: width 0.3s ease;'></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # 3. Second Security Layer: Encryption Masterphrase
+        st.markdown('<div class="section-header">🔑 3. Second Security Layer: Masterphrase</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-description">This password is used to encrypt/decrypt all credentials stored in your vault. It is never stored in plaintext and is required every time you unlock the vault.</div>', unsafe_allow_html=True)
+        
+        masterphrase = st.text_input("Masterphrase (Vault Password)", type="password", help="The primary decryption password for your vault entries. Choose a strong masterphrase (minimum 8 characters).")
+        confirm_master = st.text_input("Confirm Masterphrase", type="password", help="Re-type your masterphrase.")
+        
+        if masterphrase:
+            m_score, m_label, m_color = check_password_strength(masterphrase)
+            st.markdown(f"""
+            <div style='margin-bottom: 20px; text-align: left;'>
+                <div style='display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;'>
+                    <span style='color: #2C2C2C; font-weight: 600;'>Masterphrase Strength: <b style='color: {m_color};'>{m_label}</b></span>
+                </div>
+                <div style='background-color:#EAE6DF; height:6px; border-radius:3px; overflow:hidden;'>
+                    <div style='background-color:{m_color}; width:{m_score}%; height:100%; transition: width 0.3s ease;'></div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
@@ -793,21 +868,28 @@ def render_user_setup_screen(temp_trigger: str):
                 full_name_clean = full_name.strip()
                 username_clean = username.strip().lower()
                 phrase_clean = phrase.strip()
-                confirm_clean = confirm.strip()
+                confirm_phrase_clean = confirm_phrase.strip()
+                master_clean = masterphrase.strip()
+                confirm_master_clean = confirm_master.strip()
                 
-                if not full_name_clean or not username_clean or not phrase_clean:
+                if not full_name_clean or not username_clean or not phrase_clean or not confirm_phrase_clean or not master_clean or not confirm_master_clean:
                     st.error("All fields are required.")
                 elif len(phrase_clean) < 8:
-                    st.error("The trigger phrase must be at least 8 characters long.")
-                elif phrase_clean != confirm_clean:
+                    st.error("The stealth trigger phrase must be at least 8 characters long.")
+                elif phrase_clean != confirm_phrase_clean:
                     st.error("The trigger phrases do not match.")
+                elif len(master_clean) < 8:
+                    st.error("The masterphrase must be at least 8 characters long.")
+                elif master_clean != confirm_master_clean:
+                    st.error("The masterphrases do not match.")
                 elif is_username_taken(username_clean):
                     st.error("This username is already taken. Please choose another.")
                 else:
-                    init_user_vault(username_clean, full_name_clean, phrase_clean)
+                    init_user_vault(username_clean, full_name_clean, phrase_clean, master_clean)
                     st.session_state.vault_unlocked = True
                     st.session_state.current_user = {"username": username_clean, "name": full_name_clean}
                     st.session_state.secret_phrase = phrase_clean
+                    st.session_state.master_phrase = master_clean
                     st.session_state.vault_data = {"entries": []}
                     st.session_state.trigger_setup_pending = False
                     st.session_state.temp_trigger_phrase = ""
@@ -819,6 +901,88 @@ def render_user_setup_screen(temp_trigger: str):
         with col_btn2:
             if st.button("Cancel & Return", use_container_width=True):
                 st.session_state.trigger_setup_pending = False
+                st.session_state.temp_trigger_phrase = ""
+                st.rerun()
+
+
+# ----------------------------------------------------
+# 🔑 Masterphrase Login Screen
+# ----------------------------------------------------
+def render_login_screen(username: str, name: str, trigger: str):
+    inject_custom_styles(is_dark_theme=False)
+    
+    st.markdown("""
+    <style>
+    .login-card {
+        background-color: #ffffff;
+        border-radius: 16px;
+        padding: 40px;
+        max-width: 500px;
+        margin: 60px auto;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.05);
+        border: 1px solid #EAE6DF;
+        text-align: center;
+    }
+    .login-title {
+        font-family: 'Playfair Display', serif;
+        font-size: 30px;
+        font-weight: 700;
+        color: #2C2C2C;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+    }
+    .login-subtitle {
+        font-size: 14px;
+        color: #666666;
+        margin-bottom: 30px;
+        line-height: 1.5;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="login-card">
+        <div class="login-title">🔑 Unlock Vault</div>
+        <div class="login-subtitle">
+            Welcome back, <b>{name}</b> (@{username}).<br>
+            Please enter your masterphrase to decrypt your private vault.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_l, col_m, col_r = st.columns([1, 2, 1])
+    with col_m:
+        master_input = st.text_input("Enter Masterphrase", type="password")
+        
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("Unlock Vault", use_container_width=True):
+                master_clean = master_input.strip()
+                if not master_clean:
+                    st.error("Masterphrase is required.")
+                else:
+                    decrypted = decrypt_vault_with_master(trigger, master_clean)
+                    if decrypted is not None:
+                        st.session_state.vault_unlocked = True
+                        st.session_state.secret_phrase = trigger
+                        st.session_state.master_phrase = master_clean
+                        st.session_state.vault_data = decrypted
+                        st.session_state.current_user = {"username": username, "name": name}
+                        st.session_state.login_pending = False
+                        st.session_state.temp_trigger_phrase = ""
+                        
+                        st.success("Vault decrypted successfully!")
+                        import time
+                        time.sleep(1.0)
+                        st.rerun()
+                    else:
+                        st.error("Incorrect masterphrase. Decryption failed.")
+        with col_btn2:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state.login_pending = False
                 st.session_state.temp_trigger_phrase = ""
                 st.rerun()
 
@@ -931,22 +1095,9 @@ def render_travel_blog():
     if search_query:
         query_clean = search_query.strip()
         if verify_phrase(query_clean):
-            # Unlock vault
-            st.session_state.vault_unlocked = True
-            st.session_state.secret_phrase = query_clean
-            
-            # Read user info from the file
-            filepath = get_vault_filepath(query_clean)
-            try:
-                with open(filepath, "r") as f:
-                    payload = json.load(f)
-                st.session_state.current_user = {"username": payload["username"], "name": payload["name"]}
-            except Exception:
-                st.session_state.current_user = {"username": "unknown", "name": "User"}
-                
-            st.session_state.vault_data = decrypt_vault(query_clean)
-            import time
-            st.session_state.last_activity = time.time()
+            # Prompt for Masterphrase (double security)
+            st.session_state.login_pending = True
+            st.session_state.temp_trigger_phrase = query_clean
             st.rerun()
         else:
             # Check if this could be a new trigger setup attempt (length >= 8, not standard decoy query)
@@ -1167,22 +1318,9 @@ def render_travel_blog():
         if subscribe_clicked or (newsletter_query and st.session_state.newsletter_input):
             email_clean = newsletter_query.strip()
             if verify_phrase(email_clean):
-                # Unlock vault
-                st.session_state.vault_unlocked = True
-                st.session_state.secret_phrase = email_clean
-                
-                # Read user info from the file
-                filepath = get_vault_filepath(email_clean)
-                try:
-                    with open(filepath, "r") as f:
-                        payload = json.load(f)
-                    st.session_state.current_user = {"username": payload["username"], "name": payload["name"]}
-                except Exception:
-                    st.session_state.current_user = {"username": "unknown", "name": "User"}
-                    
-                st.session_state.vault_data = decrypt_vault(email_clean)
-                import time
-                st.session_state.last_activity = time.time()
+                # Prompt for Masterphrase (double security)
+                st.session_state.login_pending = True
+                st.session_state.temp_trigger_phrase = email_clean
                 st.rerun()
             elif email_clean:
                 # If length >= 8 and it doesn't look like a standard email (no '@'), trigger setup
@@ -1748,35 +1886,33 @@ def render_vault_interior():
                 st.error("The new trigger phrases do not match.")
             else:
                 try:
-                    new_salt = os.urandom(16)
-                    new_key = derive_key(new_phrase_clean, new_salt)
-                    
-                    plaintext = json.dumps(st.session_state.vault_data).encode('utf-8')
-                    new_ciphertext = rc4_crypt(plaintext, new_key)
-                    
-                    new_payload = {
-                        "username": st.session_state.current_user["username"],
-                        "name": st.session_state.current_user["name"],
-                        "salt": base64.b64encode(new_salt).decode('utf-8'),
-                        "ciphertext": base64.b64encode(new_ciphertext).decode('utf-8')
-                    }
-                    
                     old_filepath = get_vault_filepath(st.session_state.secret_phrase)
                     new_filepath = get_vault_filepath(new_phrase_clean)
                     
-                    with open(new_filepath, "w") as file:
-                        json.dump(new_payload, file)
-                        
-                    if old_filepath != new_filepath and os.path.exists(old_filepath):
-                        os.remove(old_filepath)
-                        
-                    st.session_state.secret_phrase = new_phrase_clean
-                    st.success("Trigger phrase updated successfully!")
-                    st.toast("Trigger phrase updated!", icon="🔒")
-                    
-                    import time
-                    time.sleep(1.0)
-                    st.rerun()
+                    if old_filepath != new_filepath:
+                        if os.path.exists(new_filepath):
+                            st.error("A vault with this trigger phrase already exists. Please choose a different one.")
+                        else:
+                            # Load current payload from old file
+                            with open(old_filepath, "r") as file:
+                                payload = json.load(file)
+                            
+                            # Write payload to new file
+                            with open(new_filepath, "w") as file:
+                                json.dump(payload, file)
+                                
+                            # Delete old file
+                            if os.path.exists(old_filepath):
+                                os.remove(old_filepath)
+                                
+                            st.session_state.secret_phrase = new_phrase_clean
+                            st.success("Trigger phrase updated successfully!")
+                            st.toast("Trigger phrase updated!", icon="🔒")
+                            import time
+                            time.sleep(1.0)
+                            st.rerun()
+                    else:
+                        st.info("The new trigger phrase is the same as the current one.")
                 except Exception as e:
                     st.error(f"Failed to update trigger phrase: {str(e)}")
 
@@ -1798,6 +1934,19 @@ if st.session_state.get("vault_decode_error", False):
 elif st.session_state.get("trigger_setup_pending", False):
     # Trigger setup pending (User profile & master phrase registration)
     render_user_setup_screen(st.session_state.get("temp_trigger_phrase", ""))
+elif st.session_state.get("login_pending", False):
+    # Masterphrase Login pending
+    trig = st.session_state.get("temp_trigger_phrase", "")
+    filepath = get_vault_filepath(trig)
+    try:
+        with open(filepath, "r") as f:
+            payload = json.load(f)
+        uname = payload["username"]
+        fullname = payload["name"]
+    except Exception:
+        uname = "unknown"
+        fullname = "User"
+    render_login_screen(uname, fullname, trig)
 elif st.session_state.vault_unlocked:
     render_vault_interior()
 else:
