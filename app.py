@@ -1216,7 +1216,7 @@ def render_vault_interior():
         """, height=2)
         
     # Top navigation bar inside the main view
-    col_nav1, col_nav2, col_nav3, col_nav4 = st.columns([1, 1, 1, 1])
+    col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns([1, 1, 1, 1, 1])
     with col_nav1:
         if st.button("🔑 All Passwords", use_container_width=True, type="primary" if st.session_state.menu_option == "All Passwords" else "secondary"):
             st.session_state.temp_menu_option = "All Passwords"
@@ -1230,6 +1230,10 @@ def render_vault_interior():
             st.session_state.temp_menu_option = "Export Vault"
             st.rerun()
     with col_nav4:
+        if st.button("⚙️ Trigger Settings", use_container_width=True, type="primary" if st.session_state.menu_option == "Trigger Settings" else "secondary"):
+            st.session_state.temp_menu_option = "Trigger Settings"
+            st.rerun()
+    with col_nav5:
         if st.button("🔒 Lock Vault", use_container_width=True, type="secondary"):
             lock_vault()
             
@@ -1259,7 +1263,7 @@ def render_vault_interior():
         st.markdown("Secure, local, and AES-256 encrypted password manager.")
         st.write("---")
         
-        options_list = ["All Passwords", "Add Entry", "Export Vault"]
+        options_list = ["All Passwords", "Add Entry", "Export Vault", "Trigger Settings"]
         curr_val = st.session_state.get("menu_option", "All Passwords")
         if curr_val not in options_list:
             curr_val = "All Passwords"
@@ -1333,8 +1337,6 @@ def render_vault_interior():
                         st.write(" ")
                         st.write(" ")
                         if st.button("⚡ Gen New", key=f"e_gen_{entry_id}", use_container_width=True):
-                            import secrets
-                            import string
                             alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
                             generated = "".join(secrets.choice(alphabet) for _ in range(16))
                             st.session_state.temp_edit_pwd = generated
@@ -1605,6 +1607,83 @@ def render_vault_interior():
                     mime="text/csv",
                     use_container_width=True
                 )
+
+    elif menu_option == "Trigger Settings":
+        st.title("⚙️ Trigger Settings")
+        st.markdown("""
+        Configure or update the **secret trigger phrase** used to access your password vault from the travel blog decoy.
+        
+        > [!IMPORTANT]
+        > Changing your trigger phrase will re-encrypt all credentials stored in your vault file using the new derived key.
+        """, unsafe_allow_html=True)
+        
+        st.write("---")
+        
+        # Show setup of the trigger
+        st.subheader("Current Trigger Configuration")
+        st.info("**Trigger Mode:** Secret phrase entered via search bar or newsletter signup\n\n**Key Derivation:** PBKDF2 with SHA-256 (100,000 iterations)")
+        
+        st.write(" ")
+        st.subheader("Update Trigger Phrase")
+        
+        curr_phrase = st.text_input("Current Trigger Phrase", type="password", key="settings_curr_phrase")
+        new_phrase = st.text_input("New Trigger Phrase", type="password", key="settings_new_phrase", help="Minimum 8 characters.")
+        confirm_phrase = st.text_input("Confirm New Trigger Phrase", type="password", key="settings_confirm_phrase")
+        
+        if new_phrase:
+            score, label, color = check_password_strength(new_phrase)
+            st.markdown(f"""
+            <div style='margin-bottom: 20px; text-align: left;'>
+                <div style='display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;'>
+                    <span style='color: #E0E1DD;'>New Phrase Strength: <b style='color: {color};'>{label}</b></span>
+                </div>
+                <div style='background-color:#415A77; height:6px; border-radius:3px; overflow:hidden;'>
+                    <div style='background-color:{color}; width:{score}%; height:100%; transition: width 0.3s ease;'></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        if st.button("Update Trigger Phrase", use_container_width=True):
+            curr_phrase_clean = curr_phrase.strip()
+            new_phrase_clean = new_phrase.strip()
+            confirm_phrase_clean = confirm_phrase.strip()
+            
+            if not curr_phrase_clean or not new_phrase_clean or not confirm_phrase_clean:
+                st.error("All fields are required.")
+            elif curr_phrase_clean != st.session_state.secret_phrase:
+                st.error("The current trigger phrase is incorrect.")
+            elif len(new_phrase_clean) < 8:
+                st.error("The new trigger phrase must be at least 8 characters long.")
+            elif new_phrase_clean != confirm_phrase_clean:
+                st.error("The new trigger phrases do not match.")
+            else:
+                try:
+                    new_salt = os.urandom(16)
+                    new_phrase_hash = sha256_hash(new_phrase_clean)
+                    new_key = derive_key(new_phrase_clean, new_salt)
+                    
+                    plaintext = json.dumps(st.session_state.vault_data).encode('utf-8')
+                    new_ciphertext = rc4_crypt(plaintext, new_key)
+                    
+                    new_payload = {
+                        "salt": base64.b64encode(new_salt).decode('utf-8'),
+                        "phrase_hash": new_phrase_hash,
+                        "ciphertext": base64.b64encode(new_ciphertext).decode('utf-8')
+                    }
+                    
+                    with open(VAULT_FILE, "w") as file:
+                        json.dump(new_payload, file)
+                        
+                    st.session_state.secret_phrase = new_phrase_clean
+                    st.success("Trigger phrase updated successfully!")
+                    st.toast("Trigger phrase updated!", icon="🔒")
+                    
+                    import time
+                    time.sleep(1.0)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to update trigger phrase: {str(e)}")
+
 
 
 # ----------------------------------------------------
