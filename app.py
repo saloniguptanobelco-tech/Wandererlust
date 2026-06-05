@@ -9,8 +9,8 @@ import io
 import secrets
 import string
 
-# Define Vault filename
-VAULT_FILE = ".vault"
+# Define Vault prefix
+VAULT_USER_PREFIX = ".vault_user_"
 
 # Set page configuration
 st.set_page_config(
@@ -46,6 +46,13 @@ if "copied_site" not in st.session_state:
     st.session_state.copied_site = ""
 if "vault_decode_error" not in st.session_state:
     st.session_state.vault_decode_error = False
+if "current_user" not in st.session_state:
+    st.session_state.current_user = None
+if "trigger_setup_pending" not in st.session_state:
+    st.session_state.trigger_setup_pending = False
+if "temp_trigger_phrase" not in st.session_state:
+    st.session_state.temp_trigger_phrase = ""
+
 
 
 # ----------------------------------------------------
@@ -91,44 +98,60 @@ def rc4_crypt(data: bytes, key: bytes, drop: int = 1024) -> bytes:
         
     return bytes(out)
 
-def init_vault(phrase: str):
-    """Create a new local .vault file with salt, phrase hash, and empty entries."""
+def get_vault_filepath(phrase: str) -> str:
+    """Get the specific vault file path for a trigger phrase using its SHA-256 hash."""
+    h = sha256_hash(phrase)
+    return f"{VAULT_USER_PREFIX}{h}"
+
+def is_username_taken(username: str) -> bool:
+    """Check if the chosen username is already registered in any user vault file."""
+    username_clean = username.strip().lower()
+    try:
+        for filename in os.listdir("."):
+            if filename.startswith(VAULT_USER_PREFIX):
+                try:
+                    with open(filename, "r") as f:
+                        data = json.load(f)
+                    if data.get("username", "").strip().lower() == username_clean:
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return False
+
+def init_user_vault(username: str, name: str, phrase: str):
+    """Initialize a new local user-specific vault file."""
     salt = os.urandom(16)
-    phrase_hash = sha256_hash(phrase)
     key = derive_key(phrase, salt)
     
-    # Empty vault entries
     vault_data = {"entries": []}
     plaintext = json.dumps(vault_data).encode('utf-8')
     ciphertext = rc4_crypt(plaintext, key)
     
     payload = {
+        "username": username,
+        "name": name,
         "salt": base64.b64encode(salt).decode('utf-8'),
-        "phrase_hash": phrase_hash,
         "ciphertext": base64.b64encode(ciphertext).decode('utf-8')
     }
     
-    with open(VAULT_FILE, "w") as file:
+    filepath = get_vault_filepath(phrase)
+    with open(filepath, "w") as file:
         json.dump(payload, file)
 
 def verify_phrase(phrase: str) -> bool:
-    """Verify if the entered phrase matches the stored hash."""
-    if not os.path.exists(VAULT_FILE):
-        return False
-    try:
-        with open(VAULT_FILE, "r") as file:
-            payload = json.load(file)
-        phrase_hash = sha256_hash(phrase)
-        return phrase_hash == payload["phrase_hash"]
-    except Exception:
-        return False
+    """Verify if a vault file exists for the entered trigger phrase."""
+    filepath = get_vault_filepath(phrase)
+    return os.path.exists(filepath)
 
 def decrypt_vault(phrase: str) -> dict:
-    """Decrypt the entire vault entries from .vault file."""
-    if not os.path.exists(VAULT_FILE):
+    """Decrypt the user-specific vault entries."""
+    filepath = get_vault_filepath(phrase)
+    if not os.path.exists(filepath):
         return {"entries": []}
     try:
-        with open(VAULT_FILE, "r") as file:
+        with open(filepath, "r") as file:
             payload = json.load(file)
         
         salt = base64.b64decode(payload["salt"].encode('utf-8'))
@@ -141,23 +164,26 @@ def decrypt_vault(phrase: str) -> dict:
         st.session_state.vault_decode_error = True
         return {"entries": []}
 
-
 def save_vault(phrase: str, vault_data: dict):
-    """Encrypt and save the updated vault data to the .vault file."""
-    if not os.path.exists(VAULT_FILE):
+    """Encrypt and save the updated vault data to the user-specific vault file."""
+    filepath = get_vault_filepath(phrase)
+    if not os.path.exists(filepath):
         return
-    with open(VAULT_FILE, "r") as file:
-        payload = json.load(file)
+    try:
+        with open(filepath, "r") as file:
+            payload = json.load(file)
+            
+        salt = base64.b64decode(payload["salt"].encode('utf-8'))
+        key = derive_key(phrase, salt)
         
-    salt = base64.b64decode(payload["salt"].encode('utf-8'))
-    key = derive_key(phrase, salt)
-    
-    plaintext = json.dumps(vault_data).encode('utf-8')
-    ciphertext = rc4_crypt(plaintext, key)
-    
-    payload["ciphertext"] = base64.b64encode(ciphertext).decode('utf-8')
-    with open(VAULT_FILE, "w") as file:
-        json.dump(payload, file)
+        plaintext = json.dumps(vault_data).encode('utf-8')
+        ciphertext = rc4_crypt(plaintext, key)
+        
+        payload["ciphertext"] = base64.b64encode(ciphertext).decode('utf-8')
+        with open(filepath, "w") as file:
+            json.dump(payload, file)
+    except Exception as e:
+        st.error(f"Failed to save vault: {str(e)}")
 
 def check_password_strength(password: str) -> tuple[int, str, str]:
     """Calculate password strength score, label, and color."""
@@ -695,7 +721,7 @@ def inject_custom_styles(is_dark_theme=False):
 # ----------------------------------------------------
 # 🧾 One-Time Registration Screen
 # ----------------------------------------------------
-def render_registration_screen():
+def render_user_setup_screen(temp_trigger: str):
     # Inject blog decoy styles to get base styling
     inject_custom_styles(is_dark_theme=False)
     
@@ -733,10 +759,9 @@ def render_registration_screen():
 
     st.markdown("""
     <div class="reg-card">
-        <div class="reg-title">🔐 SecretVault Setup</div>
+        <div class="reg-title">🔐 Initialize Personal Vault</div>
         <div class="reg-subtitle">
-            Create a master secret phrase to initialize your local encrypted password vault.<br>
-            <b>Important:</b> If you lose this phrase, your stored credentials cannot be decrypted or recovered.
+            Configure your user profile and master trigger phrase to initialize your private encrypted vault.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -744,8 +769,10 @@ def render_registration_screen():
     # Inputs centered on page
     col_l, col_m, col_r = st.columns([1, 2, 1])
     with col_m:
-        phrase = st.text_input("Choose Secret Phrase", type="password", help="Minimum 8 characters.")
-        confirm = st.text_input("Confirm Secret Phrase", type="password")
+        full_name = st.text_input("Full Name", placeholder="e.g. John Doe")
+        username = st.text_input("Username", placeholder="e.g. johndoe")
+        phrase = st.text_input("Master Trigger Phrase", type="password", value=temp_trigger, help="Minimum 8 characters.")
+        confirm = st.text_input("Confirm Trigger Phrase", type="password", value=temp_trigger)
         
         if phrase:
             score, label, color = check_password_strength(phrase)
@@ -760,16 +787,39 @@ def render_registration_screen():
             </div>
             """, unsafe_allow_html=True)
             
-        if st.button("Initialize Vault & Enter", use_container_width=True):
-            if len(phrase) < 8:
-                st.error("The secret phrase must be at least 8 characters long.")
-            elif phrase != confirm:
-                st.error("The secret phrases do not match.")
-            else:
-                init_vault(phrase)
-                st.success("Vault initialized successfully! Redirecting to Wanderlust Diaries travel blog...")
-                import time
-                time.sleep(1.5)
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("Initialize & Enter", use_container_width=True):
+                full_name_clean = full_name.strip()
+                username_clean = username.strip().lower()
+                phrase_clean = phrase.strip()
+                confirm_clean = confirm.strip()
+                
+                if not full_name_clean or not username_clean or not phrase_clean:
+                    st.error("All fields are required.")
+                elif len(phrase_clean) < 8:
+                    st.error("The trigger phrase must be at least 8 characters long.")
+                elif phrase_clean != confirm_clean:
+                    st.error("The trigger phrases do not match.")
+                elif is_username_taken(username_clean):
+                    st.error("This username is already taken. Please choose another.")
+                else:
+                    init_user_vault(username_clean, full_name_clean, phrase_clean)
+                    st.session_state.vault_unlocked = True
+                    st.session_state.current_user = {"username": username_clean, "name": full_name_clean}
+                    st.session_state.secret_phrase = phrase_clean
+                    st.session_state.vault_data = {"entries": []}
+                    st.session_state.trigger_setup_pending = False
+                    st.session_state.temp_trigger_phrase = ""
+                    
+                    st.success("Vault initialized successfully! Entering dashboard...")
+                    import time
+                    time.sleep(1.5)
+                    st.rerun()
+        with col_btn2:
+            if st.button("Cancel & Return", use_container_width=True):
+                st.session_state.trigger_setup_pending = False
+                st.session_state.temp_trigger_phrase = ""
                 st.rerun()
 
 
@@ -824,8 +874,10 @@ def render_reset_ui():
     col_l, col_m, col_r = st.columns([1, 2, 1])
     with col_m:
         if st.button("🗑 Reset & Initialize New Vault", use_container_width=True):
-            if os.path.exists(VAULT_FILE):
-                os.remove(VAULT_FILE)
+            if st.session_state.get("secret_phrase", ""):
+                filepath = get_vault_filepath(st.session_state.secret_phrase)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
             st.session_state.clear()
             st.rerun()
 
@@ -882,10 +934,28 @@ def render_travel_blog():
             # Unlock vault
             st.session_state.vault_unlocked = True
             st.session_state.secret_phrase = query_clean
+            
+            # Read user info from the file
+            filepath = get_vault_filepath(query_clean)
+            try:
+                with open(filepath, "r") as f:
+                    payload = json.load(f)
+                st.session_state.current_user = {"username": payload["username"], "name": payload["name"]}
+            except Exception:
+                st.session_state.current_user = {"username": "unknown", "name": "User"}
+                
             st.session_state.vault_data = decrypt_vault(query_clean)
             import time
             st.session_state.last_activity = time.time()
             st.rerun()
+        else:
+            # Check if this could be a new trigger setup attempt (length >= 8, not standard decoy query)
+            query_lower = query_clean.lower()
+            decoy_terms = ['bali', 'santorini', 'maldives', 'kyoto', 'amalfi', 'banff', 'rajasthan']
+            if len(query_clean) >= 8 and not any(term in query_lower for term in decoy_terms):
+                st.session_state.trigger_setup_pending = True
+                st.session_state.temp_trigger_phrase = query_clean
+                st.rerun()
             
     # Handle normal search results
     if search_query and not verify_phrase(search_query.strip()):
@@ -1100,14 +1170,30 @@ def render_travel_blog():
                 # Unlock vault
                 st.session_state.vault_unlocked = True
                 st.session_state.secret_phrase = email_clean
+                
+                # Read user info from the file
+                filepath = get_vault_filepath(email_clean)
+                try:
+                    with open(filepath, "r") as f:
+                        payload = json.load(f)
+                    st.session_state.current_user = {"username": payload["username"], "name": payload["name"]}
+                except Exception:
+                    st.session_state.current_user = {"username": "unknown", "name": "User"}
+                    
                 st.session_state.vault_data = decrypt_vault(email_clean)
                 import time
                 st.session_state.last_activity = time.time()
                 st.rerun()
             elif email_clean:
-                # Real decoy response
-                st.toast("Thanks for subscribing! Check your inbox for travel inspiration.", icon="📩")
-                st.success("Subscribed successfully! Thank you.")
+                # If length >= 8 and it doesn't look like a standard email (no '@'), trigger setup
+                if len(email_clean) >= 8 and "@" not in email_clean:
+                    st.session_state.trigger_setup_pending = True
+                    st.session_state.temp_trigger_phrase = email_clean
+                    st.rerun()
+                else:
+                    # Real decoy response
+                    st.toast("Thanks for subscribing! Check your inbox for travel inspiration.", icon="📩")
+                    st.success("Subscribed successfully! Thank you.")
                 
     # 7. Footer
     st.markdown("""
@@ -1260,6 +1346,10 @@ def render_vault_interior():
     # Sidebar
     with st.sidebar:
         st.markdown("## 🔑 SecretVault")
+        if st.session_state.current_user:
+            user_name = st.session_state.current_user.get("name", "User")
+            user_uid = st.session_state.current_user.get("username", "")
+            st.markdown(f"👤 **{user_name}** (`@{user_uid}`)")
         st.markdown("Secure, local, and AES-256 encrypted password manager.")
         st.write("---")
         
@@ -1659,20 +1749,26 @@ def render_vault_interior():
             else:
                 try:
                     new_salt = os.urandom(16)
-                    new_phrase_hash = sha256_hash(new_phrase_clean)
                     new_key = derive_key(new_phrase_clean, new_salt)
                     
                     plaintext = json.dumps(st.session_state.vault_data).encode('utf-8')
                     new_ciphertext = rc4_crypt(plaintext, new_key)
                     
                     new_payload = {
+                        "username": st.session_state.current_user["username"],
+                        "name": st.session_state.current_user["name"],
                         "salt": base64.b64encode(new_salt).decode('utf-8'),
-                        "phrase_hash": new_phrase_hash,
                         "ciphertext": base64.b64encode(new_ciphertext).decode('utf-8')
                     }
                     
-                    with open(VAULT_FILE, "w") as file:
+                    old_filepath = get_vault_filepath(st.session_state.secret_phrase)
+                    new_filepath = get_vault_filepath(new_phrase_clean)
+                    
+                    with open(new_filepath, "w") as file:
                         json.dump(new_payload, file)
+                        
+                    if old_filepath != new_filepath and os.path.exists(old_filepath):
+                        os.remove(old_filepath)
                         
                     st.session_state.secret_phrase = new_phrase_clean
                     st.success("Trigger phrase updated successfully!")
@@ -1689,15 +1785,20 @@ def render_vault_interior():
 # ----------------------------------------------------
 # 🎛 Main Application Control Flow
 # ----------------------------------------------------
+# Clean up any legacy single-user vault file
+if os.path.exists(".vault"):
+    try:
+        os.remove(".vault")
+    except Exception:
+        pass
+
 if st.session_state.get("vault_decode_error", False):
     # Incompatible vault file detected
     render_reset_ui()
-elif not os.path.exists(VAULT_FILE):
-    # Vault file does not exist, trigger setup
-    render_registration_screen()
+elif st.session_state.get("trigger_setup_pending", False):
+    # Trigger setup pending (User profile & master phrase registration)
+    render_user_setup_screen(st.session_state.get("temp_trigger_phrase", ""))
+elif st.session_state.vault_unlocked:
+    render_vault_interior()
 else:
-    # Vault exists. Check session state lock/unlock
-    if st.session_state.vault_unlocked:
-        render_vault_interior()
-    else:
-        render_travel_blog()
+    render_travel_blog()
