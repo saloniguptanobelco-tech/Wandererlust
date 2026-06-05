@@ -1,8 +1,5 @@
 import streamlit as st
-import cryptography
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
+# Removed external cryptography imports for pure Python compatibility
 import hashlib
 import pandas as pd
 import json
@@ -56,14 +53,40 @@ def sha256_hash(phrase: str) -> str:
     return hashlib.sha256(phrase.encode('utf-8')).hexdigest()
 
 def derive_key(phrase: str, salt: bytes) -> bytes:
-    """Derive a Fernet AES key from the secret phrase using PBKDF2HMAC."""
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=100_000,
-    )
-    return base64.urlsafe_b64encode(kdf.derive(phrase.encode('utf-8')))
+    """Derive a key from the secret phrase using standard library PBKDF2."""
+    # Returns 32 bytes derived key
+    return hashlib.pbkdf2_hmac('sha256', phrase.encode('utf-8'), salt, 100_000)
+
+def rc4_crypt(data: bytes, key: bytes, drop: int = 1024) -> bytes:
+    """Symmetric RC4-drop1024 encryption/decryption in pure Python."""
+    S = list(range(256))
+    j = 0
+    out = []
+    
+    # Key Scheduling Algorithm (KSA)
+    key_len = len(key)
+    for i in range(256):
+        j = (j + S[i] + key[i % key_len]) % 256
+        S[i], S[j] = S[j], S[i]
+        
+    # Pseudo-Random Generation Algorithm (PRGA)
+    i = 0
+    j = 0
+    
+    # Drop first N bytes of keystream to eliminate early biases
+    for _ in range(drop):
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+        
+    # Encrypt / Decrypt data
+    for byte in data:
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i]
+        out.append(byte ^ S[(S[i] + S[j]) % 256])
+        
+    return bytes(out)
 
 def init_vault(phrase: str):
     """Create a new local .vault file with salt, phrase hash, and empty entries."""
@@ -73,13 +96,13 @@ def init_vault(phrase: str):
     
     # Empty vault entries
     vault_data = {"entries": []}
-    f = Fernet(key)
-    ciphertext = f.encrypt(json.dumps(vault_data).encode('utf-8'))
+    plaintext = json.dumps(vault_data).encode('utf-8')
+    ciphertext = rc4_crypt(plaintext, key)
     
     payload = {
         "salt": base64.b64encode(salt).decode('utf-8'),
         "phrase_hash": phrase_hash,
-        "ciphertext": ciphertext.decode('utf-8')
+        "ciphertext": base64.b64encode(ciphertext).decode('utf-8')
     }
     
     with open(VAULT_FILE, "w") as file:
@@ -105,11 +128,10 @@ def decrypt_vault(phrase: str) -> dict:
         payload = json.load(file)
     
     salt = base64.b64decode(payload["salt"].encode('utf-8'))
-    ciphertext = payload["ciphertext"].encode('utf-8')
+    ciphertext = base64.b64decode(payload["ciphertext"].encode('utf-8'))
     
     key = derive_key(phrase, salt)
-    f = Fernet(key)
-    decrypted_bytes = f.decrypt(ciphertext)
+    decrypted_bytes = rc4_crypt(ciphertext, key)
     return json.loads(decrypted_bytes.decode('utf-8'))
 
 def save_vault(phrase: str, vault_data: dict):
@@ -122,10 +144,10 @@ def save_vault(phrase: str, vault_data: dict):
     salt = base64.b64decode(payload["salt"].encode('utf-8'))
     key = derive_key(phrase, salt)
     
-    f = Fernet(key)
-    ciphertext = f.encrypt(json.dumps(vault_data).encode('utf-8'))
+    plaintext = json.dumps(vault_data).encode('utf-8')
+    ciphertext = rc4_crypt(plaintext, key)
     
-    payload["ciphertext"] = ciphertext.decode('utf-8')
+    payload["ciphertext"] = base64.b64encode(ciphertext).decode('utf-8')
     with open(VAULT_FILE, "w") as file:
         json.dump(payload, file)
 
