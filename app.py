@@ -1554,23 +1554,57 @@ def render_vault_interior():
             desired_cols = [c for c in column_mapping.values() if c in df.columns]
             df = df[desired_cols]
             
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name="Passwords")
-            excel_data = output.getvalue()
+            # Determine available Excel engine
+            excel_engine = None
+            try:
+                import openpyxl
+                excel_engine = 'openpyxl'
+            except ImportError:
+                try:
+                    import xlsxwriter
+                    excel_engine = 'xlsxwriter'
+                except ImportError:
+                    pass
+
+            excel_data = None
+            if excel_engine:
+                try:
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine=excel_engine) as writer:
+                        df.to_excel(writer, index=False, sheet_name="Passwords")
+                    excel_data = output.getvalue()
+                except Exception:
+                    excel_data = None
+
+            # Prepare CSV fallback data
+            csv_data = df.to_csv(index=False).encode('utf-8')
             
             st.write("Preview of export list (passwords masked for security):")
             preview_df = df.copy()
             preview_df["Password"] = "••••••••"
             st.dataframe(preview_df, use_container_width=True)
             
-            st.download_button(
-                label="Download Excel File (.xlsx)",
-                data=excel_data,
-                file_name="wanderlust_passwords.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            if excel_data:
+                st.download_button(
+                    label="Download Excel File (.xlsx)",
+                    data=excel_data,
+                    file_name="wanderlust_passwords.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.markdown("""
+                > [!NOTE]
+                > Excel writing engines (`openpyxl` / `xlsxwriter`) are currently not available in this environment. Falling back to CSV export.
+                """, unsafe_allow_html=True)
+                
+                st.download_button(
+                    label="Download CSV File (.csv)",
+                    data=csv_data,
+                    file_name="wanderlust_passwords.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
 
 
 # ----------------------------------------------------
